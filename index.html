@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>局域网共享剪贴板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/socket.io@4.7.2/client-dist/socket.io.min.js"></script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        secondary: '#64748b',
+                        accent: '#06b6d4',
+                        neutral: '#f1f5f9',
+                        'neutral-dark': '#334155'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-bold text-gray-800 mb-2">局域网共享剪贴板</h1>
+            <p class="text-gray-600">在同一局域网内的所有用户可以实时查看和编辑此剪贴板</p>
+        </header>
+
+        <main class="max-w-4xl mx-auto">
+            <!-- 文本剪贴板区域 -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">文本剪贴板</h2>
+                    <div class="flex space-x-2">
+                        <button id="clearBtn" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors">
+                            清空
+                        </button>
+                        <button id="copyBtn" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition-colors">
+                            复制到本地
+                        </button>
+                    </div>
+                </div>
+                <textarea 
+                    id="clipboard" 
+                    class="w-full h-64 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-all resize-none text-lg" 
+                    placeholder="在此输入或粘贴文本内容，支持Ctrl+V粘贴图片..."
+                ></textarea>
+            </div>
+
+            <!-- 图片预览区域 -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                <h2 class="text-xl font-semibold text-gray-700 mb-4">图片预览</h2>
+                <div id="imagePreview" class="border-2 border-dashed border-gray-300 rounded-lg p-4 min-h-[200px] flex items-center justify-center">
+                    <p class="text-gray-500 text-center">粘贴图片或拖拽图片到此处<br>（支持Ctrl+V粘贴截图）</p>
+                </div>
+            </div>
+
+            <!-- 文件传输区域 -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">文件传输</h2>
+                    <label for="fileInput" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors cursor-pointer">
+                        上传文件
+                    </label>
+                    <input type="file" id="fileInput" class="hidden" multiple>
+                </div>
+                <div id="fileList" class="space-y-2 max-h-[300px] overflow-y-auto">
+                    <p class="text-gray-500 text-center">暂无共享文件</p>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-lg shadow-lg p-6">
+                <h2 class="text-xl font-semibold text-gray-700 mb-4">在线用户</h2>
+                <div id="usersList" class="text-gray-600">
+                    <p>当前在线: <span id="userCount">0</span> 人</p>
+                </div>
+            </div>
+        </main>
+
+        <footer class="mt-8 text-center text-gray-500 text-sm">
+            <p>局域网共享剪贴板 - 简单、高效的团队协作工具</p>
+        </footer>
+    </div>
+
+    <script>
+        // 全局变量
+        let clipboardData = {
+            text: '',
+            image: '',
+            files: []
+        };
+        let userCount = 0;
+        let isTyping = false;
+        let isUploading = false;
+        const UPDATE_INTERVAL = 1000; // 1秒更新一次
+        const TYPING_DELAY = 500; // 输入延迟500ms后发送更新
+
+        // 初始化页面
+        document.addEventListener('DOMContentLoaded', () => {
+            const clipboard = document.getElementById('clipboard');
+            const clearBtn = document.getElementById('clearBtn');
+            const copyBtn = document.getElementById('copyBtn');
+            const userCountEl = document.getElementById('userCount');
+            const imagePreview = document.getElementById('imagePreview');
+            const fileInput = document.getElementById('fileInput');
+            const fileList = document.getElementById('fileList');
+
+            // 加载初始数据
+            fetchInitialData();
+
+            // 启动轮询
+            startPolling();
+
+            // 监听文本内容变化
+            let typingTimer;
+            clipboard.addEventListener('input', (e) => {
+                isTyping = true;
+                clipboardData.text = e.target.value;
+                
+                // 清除之前的定时器
+                clearTimeout(typingTimer);
+                
+                // 设置新的定时器，延迟发送更新
+                typingTimer = setTimeout(() => {
+                    sendDataUpdate();
+                    isTyping = false;
+                }, TYPING_DELAY);
+            });
+
+            // 清空按钮
+            clearBtn.addEventListener('click', () => {
+                if (confirm('确定要清空所有内容吗？')) {
+                    clipboard.value = '';
+                    clipboardData.text = '';
+                    clipboardData.image = '';
+                    clipboardData.files = [];
+                    imagePreview.innerHTML = '<p class="text-gray-500 text-center">粘贴图片或拖拽图片到此处<br>（支持Ctrl+V粘贴截图）</p>';
+                    updateFileList();
+                    sendDataUpdate();
+                    showToast('内容已清空');
+                }
+            });
+
+            // 复制到本地按钮
+            copyBtn.addEventListener('click', () => {
+                if (clipboardData.text) {
+                    navigator.clipboard.writeText(clipboardData.text).then(() => {
+                        showToast('文本已复制到本地剪贴板');
+                    }).catch(err => {
+                        console.error('复制失败:', err);
+                        alert('复制失败，请手动选择并复制');
+                    });
+                } else {
+                    showToast('没有可复制的文本内容');
+                }
+            });
+
+            // 设置图片预览区域的事件监听
+            setupImagePreview(imagePreview);
+
+            // 设置文件上传
+            fileInput.addEventListener('change', handleFileSelect);
+
+            // 设置拖拽上传
+            setupDragAndDrop(imagePreview);
+        });
+
+        // 设置图片预览区域
+        function setupImagePreview(imagePreview) {
+            // 监听粘贴事件
+            imagePreview.addEventListener('paste', (e) => {
+                e.preventDefault();
+                const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+                
+                for (let item of items) {
+                    if (item.type.indexOf('image') !== -1) {
+                        const file = item.getAsFile();
+                        handleImageFile(file);
+                        break;
+                    }
+                }
+            });
+
+            // 点击图片预览区域可以复制图片
+            imagePreview.addEventListener('click', () => {
+                if (clipboardData.image) {
+                    copyImageToClipboard(clipboardData.image);
+                }
+            });
+        }
+
+        // 设置拖拽上传
+        function setupDragAndDrop(dropZone) {
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, preventDefaults, false);
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, highlight, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, unhighlight, false);
+            });
+
+            function highlight() {
+                dropZone.classList.add('bg-blue-50', 'border-blue-400');
+            }
+
+            function unhighlight() {
+                dropZone.classList.remove('bg-blue-50', 'border-blue-400');
+            }
+
+            dropZone.addEventListener('drop', handleDrop, false);
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    if (file.type.indexOf('image') !== -1) {
+                        handleImageFile(file);
+                    } else {
+                        uploadFile(file);
+                    }
+                }
+            }
+        }
+
+        // 处理图片文件
+        function handleImageFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const imageData = e.target.result;
+                clipboardData.image = imageData;
+                
+                // 更新图片预览
+                const imagePreview = document.getElementById('imagePreview');
+                imagePreview.innerHTML = `
+                    <div class="relative w-full max-h-[400px] overflow-hidden">
+                        <img src="${imageData}" class="max-w-full max-h-[400px] object-contain cursor-pointer hover:opacity-90 transition-opacity" alt="预览图片">
+                        <div class="absolute top-2 right-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
+                            点击复制
+                        </div>
+                    </div>
+                `;
+                
+                sendDataUpdate();
+                showToast('图片已粘贴到共享剪贴板');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // 复制图片到剪贴板
+        function copyImageToClipboard(imageDataUrl) {
+            fetch(imageDataUrl)
+                .then(res => res.blob())
+                .then(blob => {
+                    const item = new ClipboardItem({ 'image/png': blob });
+                    navigator.clipboard.write([item]).then(() => {
+                        showToast('图片已复制到本地剪贴板');
+                    }).catch(err => {
+                        console.error('复制图片失败:', err);
+                        showToast('复制图片失败，请尝试截图');
+                    });
+                });
+        }
+
+        // 处理文件选择
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            for (let i = 0; i < files.length; i++) {
+                uploadFile(files[i]);
+            }
+            // 清空文件输入，以便可以再次选择相同的文件
+            e.target.value = '';
+        }
+
+        // 上传文件
+        function uploadFile(file) {
+            if (isUploading) {
+                showToast('正在上传其他文件，请稍后再试');
+                return;
+            }
+
+            isUploading = true;
+            const fileId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            const fileName = file.name;
+            const fileSize = formatFileSize(file.size);
+            
+            // 添加文件到列表（显示上传进度）
+            const fileItem = {
+                id: fileId,
+                name: fileName,
+                size: fileSize,
+                originalSize: file.size,
+                progress: 0,
+                status: 'uploading',
+                url: ''
+            };
+            
+            clipboardData.files.push(fileItem);
+            updateFileList();
+            
+            // 模拟文件上传（实际应该使用FormData和fetch）
+            const reader = new FileReader();
+            let uploadedBytes = 0;
+            const chunkSize = 1024 * 1024; // 1MB chunks
+            
+            reader.onload = (e) => {
+                // 模拟上传延迟
+                setTimeout(() => {
+                    uploadedBytes += chunkSize;
+                    const progress = Math.min(Math.round((uploadedBytes / file.size) * 100), 100);
+                    
+                    // 更新文件进度
+                    const fileIndex = clipboardData.files.findIndex(f => f.id === fileId);
+                    if (fileIndex !== -1) {
+                        clipboardData.files[fileIndex].progress = progress;
+                        updateFileList();
+                    }
+                    
+                    if (uploadedBytes < file.size) {
+                        // 继续上传下一块
+                        reader.readAsDataURL(file.slice(uploadedBytes, uploadedBytes + chunkSize));
+                    } else {
+                        // 上传完成
+                        const fileIndex = clipboardData.files.findIndex(f => f.id === fileId);
+                        if (fileIndex !== -1) {
+                            clipboardData.files[fileIndex].status = 'completed';
+                            clipboardData.files[fileIndex].url = e.target.result; // 在实际应用中，这应该是服务器返回的URL
+                            updateFileList();
+                            sendDataUpdate();
+                            showToast(`文件 "${fileName}" 上传完成`);
+                        }
+                        isUploading = false;
+                    }
+                }, 100); // 模拟网络延迟
+            };
+            
+            reader.readAsDataURL(file.slice(0, chunkSize));
+        }
+
+        // 更新文件列表显示
+        function updateFileList() {
+            const fileList = document.getElementById('fileList');
+            
+            if (clipboardData.files.length === 0) {
+                fileList.innerHTML = '<p class="text-gray-500 text-center">暂无共享文件</p>';
+                return;
+            }
+            
+            fileList.innerHTML = clipboardData.files.map(file => `
+                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div class="flex items-center space-x-3">
+                        <div class="text-blue-500">
+                            <i class="fa fa-file-o text-xl"></i>
+                        </div>
+                        <div>
+                            <p class="font-medium text-gray-800">${file.name}</p>
+                            <p class="text-sm text-gray-500">${file.size}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        ${file.status === 'uploading' ? `
+                            <div class="w-32">
+                                <div class="h-2 bg-gray-200 rounded-full">
+                                    <div class="h-2 bg-blue-500 rounded-full" style="width: ${file.progress}%"></div>
+                                </div>
+                                <p class="text-xs text-gray-500">${file.progress}%</p>
+                            </div>
+                        ` : ''}
+                        ${file.status === 'completed' ? `
+                            <button onclick="downloadFile('${file.id}')" class="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 transition-colors text-sm">
+                                下载
+                            </button>
+                            <button onclick="deleteFile('${file.id}')" class="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 transition-colors text-sm">
+                                删除
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 下载文件
+        function downloadFile(fileId) {
+            const file = clipboardData.files.find(f => f.id === fileId);
+            if (file && file.url) {
+                const link = document.createElement('a');
+                link.href = file.url;
+                link.download = file.name;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showToast(`开始下载文件 "${file.name}"`);
+            }
+        }
+
+        // 删除文件
+        function deleteFile(fileId) {
+            if (confirm('确定要删除这个文件吗？')) {
+                clipboardData.files = clipboardData.files.filter(f => f.id !== fileId);
+                updateFileList();
+                sendDataUpdate();
+                showToast('文件已删除');
+            }
+        }
+
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // 获取初始数据
+        function fetchInitialData() {
+            fetch('/data')
+                .then(response => response.json())
+                .then(data => {
+                    const clipboard = document.getElementById('clipboard');
+                    const userCountEl = document.getElementById('userCount');
+                    const imagePreview = document.getElementById('imagePreview');
+                    
+                    // 更新文本内容
+                    clipboardData.text = data.text || '';
+                    clipboard.value = clipboardData.text;
+                    
+                    // 更新图片内容
+                    if (data.image) {
+                        clipboardData.image = data.image;
+                        imagePreview.innerHTML = `
+                            <div class="relative w-full max-h-[400px] overflow-hidden">
+                                <img src="${data.image}" class="max-w-full max-h-[400px] object-contain cursor-pointer hover:opacity-90 transition-opacity" alt="预览图片">
+                                <div class="absolute top-2 right-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
+                                    点击复制
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
+                    // 更新文件列表
+                    if (data.files && Array.isArray(data.files)) {
+                        clipboardData.files = data.files;
+                        updateFileList();
+                    }
+                    
+                    // 更新用户数
+                    userCount = data.users || 0;
+                    userCountEl.textContent = userCount;
+                    
+                    console.log('初始数据加载完成:', data);
+                })
+                .catch(error => {
+                    console.error('获取初始数据失败:', error);
+                    showToast('无法连接到服务器，使用本地模式');
+                });
+        }
+
+        // 发送数据更新到服务器
+        function sendDataUpdate() {
+            fetch('/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text: clipboardData.text,
+                    image: clipboardData.image,
+                    files: clipboardData.files
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('更新发送成功:', data);
+            })
+            .catch(error => {
+                console.error('发送更新失败:', error);
+                // 如果发送失败，保存到本地存储
+                localStorage.setItem('clipboardData', JSON.stringify(clipboardData));
+            });
+        }
+
+        // 轮询获取最新数据
+        function startPolling() {
+            setInterval(() => {
+                // 如果用户正在输入或上传，就不获取更新
+                if (isTyping || isUploading) return;
+
+                fetch('/data')
+                    .then(response => response.json())
+                    .then(data => {
+                        const clipboard = document.getElementById('clipboard');
+                        const userCountEl = document.getElementById('userCount');
+                        const imagePreview = document.getElementById('imagePreview');
+                        
+                        // 更新用户数
+                        if (data.users !== undefined && data.users !== userCount) {
+                            userCount = data.users;
+                            userCountEl.textContent = userCount;
+                        }
+                        
+                        // 更新文本内容
+                        if (data.text !== undefined && data.text !== clipboardData.text) {
+                            clipboardData.text = data.text;
+                            clipboard.value = clipboardData.text;
+                        }
+                        
+                        // 更新图片内容
+                        if (data.image !== undefined && data.image !== clipboardData.image) {
+                            clipboardData.image = data.image;
+                            if (data.image) {
+                                imagePreview.innerHTML = `
+                                    <div class="relative w-full max-h-[400px] overflow-hidden">
+                                        <img src="${data.image}" class="max-w-full max-h-[400px] object-contain cursor-pointer hover:opacity-90 transition-opacity" alt="预览图片">
+                                        <div class="absolute top-2 right-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
+                                            点击复制
+                                        </div>
+                                    </div>
+                                `;
+                            }
+                        }
+                        
+                        // 更新文件列表
+                        if (data.files && Array.isArray(data.files)) {
+                            clipboardData.files = data.files;
+                            updateFileList();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('轮询失败:', error);
+                    });
+            }, UPDATE_INTERVAL);
+        }
+
+        // 显示提示消息
+        function showToast(message) {
+            const toast = document.createElement('div');
+            toast.className = 'fixed bottom-4 right-4 bg-blue-500 text-white px-4 py-2 rounded shadow-lg z-50';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+
+            // 2秒后移除提示
+            setTimeout(() => {
+                if (document.body.contains(toast)) {
+                    document.body.removeChild(toast);
+                }
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
